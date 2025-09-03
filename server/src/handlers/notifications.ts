@@ -1,8 +1,12 @@
+import { db } from '../db';
+import { notificationsTable } from '../db/schema';
 import { 
     type Notification,
     type CreateNotificationInput,
     type MarkNotificationReadInput 
 } from '../schema';
+import { eq, and, desc, count } from 'drizzle-orm';
+import type { SQL } from 'drizzle-orm';
 
 /**
  * Get notifications for a user
@@ -14,9 +18,39 @@ export async function getUserNotifications(userId: number, filters?: {
     page?: number; 
     limit?: number; 
 }): Promise<Notification[]> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to fetch user notifications with filtering
-    return Promise.resolve([]);
+    try {
+        // Set default pagination values
+        const page = filters?.page || 1;
+        const limit = filters?.limit || 20;
+        const offset = (page - 1) * limit;
+
+        // Build conditions array
+        const conditions: SQL<unknown>[] = [
+            eq(notificationsTable.userId, userId)
+        ];
+
+        // Add unread filter if specified
+        if (filters?.unreadOnly) {
+            conditions.push(eq(notificationsTable.isRead, false));
+        }
+
+        // Build complete query in one go to avoid type issues
+        const results = await db.select()
+            .from(notificationsTable)
+            .where(and(...conditions))
+            .orderBy(desc(notificationsTable.createdAt))
+            .limit(limit)
+            .offset(offset)
+            .execute();
+
+        return results.map(notification => ({
+            ...notification,
+            createdAt: new Date(notification.createdAt)
+        }));
+    } catch (error) {
+        console.error('Failed to get user notifications:', error);
+        throw error;
+    }
 }
 
 /**
@@ -25,17 +59,27 @@ export async function getUserNotifications(userId: number, filters?: {
  * (case updates, comments, mentions, collaboration invites, etc.)
  */
 export async function createNotification(input: CreateNotificationInput): Promise<Notification> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to create notifications for system events
-    return Promise.resolve({
-        id: 0,
-        userId: input.userId,
-        type: input.type,
-        message: input.message,
-        isRead: false,
-        createdAt: new Date(),
-        metadata: input.metadata || null
-    } as Notification);
+    try {
+        const result = await db.insert(notificationsTable)
+            .values({
+                userId: input.userId,
+                type: input.type,
+                message: input.message,
+                metadata: input.metadata || null,
+                isRead: false
+            })
+            .returning()
+            .execute();
+
+        const notification = result[0];
+        return {
+            ...notification,
+            createdAt: new Date(notification.createdAt)
+        };
+    } catch (error) {
+        console.error('Failed to create notification:', error);
+        throw error;
+    }
 }
 
 /**
@@ -43,9 +87,21 @@ export async function createNotification(input: CreateNotificationInput): Promis
  * This handler should update the read status of a notification
  */
 export async function markNotificationRead(input: MarkNotificationReadInput, userId: number): Promise<boolean> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to mark a user's notification as read
-    return Promise.resolve(true);
+    try {
+        const result = await db.update(notificationsTable)
+            .set({ isRead: true })
+            .where(and(
+                eq(notificationsTable.id, input.notificationId),
+                eq(notificationsTable.userId, userId)
+            ))
+            .returning({ id: notificationsTable.id })
+            .execute();
+
+        return result.length > 0;
+    } catch (error) {
+        console.error('Failed to mark notification as read:', error);
+        throw error;
+    }
 }
 
 /**
@@ -53,9 +109,20 @@ export async function markNotificationRead(input: MarkNotificationReadInput, use
  * This handler should mark all unread notifications as read
  */
 export async function markAllNotificationsRead(userId: number): Promise<boolean> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to mark all user notifications as read
-    return Promise.resolve(true);
+    try {
+        await db.update(notificationsTable)
+            .set({ isRead: true })
+            .where(and(
+                eq(notificationsTable.userId, userId),
+                eq(notificationsTable.isRead, false)
+            ))
+            .execute();
+
+        return true;
+    } catch (error) {
+        console.error('Failed to mark all notifications as read:', error);
+        throw error;
+    }
 }
 
 /**
@@ -63,7 +130,18 @@ export async function markAllNotificationsRead(userId: number): Promise<boolean>
  * This handler should return the count of unread notifications for a user
  */
 export async function getUnreadNotificationCount(userId: number): Promise<number> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to get count of unread notifications
-    return Promise.resolve(0);
+    try {
+        const result = await db.select({ count: count() })
+            .from(notificationsTable)
+            .where(and(
+                eq(notificationsTable.userId, userId),
+                eq(notificationsTable.isRead, false)
+            ))
+            .execute();
+
+        return result[0]?.count || 0;
+    } catch (error) {
+        console.error('Failed to get unread notification count:', error);
+        throw error;
+    }
 }

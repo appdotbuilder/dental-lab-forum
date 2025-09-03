@@ -8,6 +8,9 @@ import {
     type UploadFileInput,
     type UpdateAnnotationsInput 
 } from '../schema';
+import { db } from '../db';
+import { casesTable, caseTagsTable, caseCollaboratorsTable } from '../db/schema';
+import { eq, and, or, desc, asc, sql, inArray } from 'drizzle-orm';
 
 // Cases
 /**
@@ -15,10 +18,129 @@ import {
  * This handler should fetch cases based on type, priority, status, creator, tags, and privacy settings
  */
 export async function getCases(query: CasesQueryInput, userId?: number): Promise<Case[]> {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is to fetch filtered and paginated cases
-    // Should respect privacy settings - only show public cases + user's own cases + collaborated cases
-    return Promise.resolve([]);
+    try {
+        // Default pagination values
+        const page = query.page || 1;
+        const limit = query.limit || 10;
+        const offset = (page - 1) * limit;
+
+        // Get case IDs that the user collaborates on (if authenticated)
+        let collaboratedCaseIds: number[] = [];
+        if (userId) {
+            const collaboratedCases = await db
+                .select({ caseId: caseCollaboratorsTable.caseId })
+                .from(caseCollaboratorsTable)
+                .where(eq(caseCollaboratorsTable.userId, userId))
+                .execute();
+
+            collaboratedCaseIds = collaboratedCases.map(c => c.caseId);
+        }
+
+        // Get case IDs with the specified tag (if filtering by tag)
+        let taggedCaseIds: number[] = [];
+        if (query.tag) {
+            const taggedCases = await db
+                .select({ caseId: caseTagsTable.caseId })
+                .from(caseTagsTable)
+                .where(eq(caseTagsTable.tag, query.tag))
+                .execute();
+
+            taggedCaseIds = taggedCases.map(c => c.caseId);
+            
+            if (taggedCaseIds.length === 0) {
+                // No cases with this tag exist, return empty result
+                return [];
+            }
+        }
+
+        // Build conditions array
+        const conditions = [];
+
+        // Privacy filter: public cases + user's own cases + collaborated cases
+        if (userId) {
+            // User can see: public cases OR their own cases OR cases they collaborate on
+            if (collaboratedCaseIds.length > 0) {
+                conditions.push(
+                    or(
+                        eq(casesTable.isPublic, true),
+                        eq(casesTable.creatorId, userId),
+                        inArray(casesTable.id, collaboratedCaseIds)
+                    )
+                );
+            } else {
+                conditions.push(
+                    or(
+                        eq(casesTable.isPublic, true),
+                        eq(casesTable.creatorId, userId)
+                    )
+                );
+            }
+        } else {
+            // Anonymous users can only see public cases
+            conditions.push(eq(casesTable.isPublic, true));
+        }
+
+        // Apply filters
+        if (query.caseType) {
+            conditions.push(eq(casesTable.caseType, query.caseType));
+        }
+
+        if (query.priority) {
+            conditions.push(eq(casesTable.priority, query.priority));
+        }
+
+        if (query.status) {
+            conditions.push(eq(casesTable.status, query.status));
+        }
+
+        if (query.isPublic !== undefined) {
+            conditions.push(eq(casesTable.isPublic, query.isPublic));
+        }
+
+        if (query.creatorId) {
+            conditions.push(eq(casesTable.creatorId, query.creatorId));
+        }
+
+        // Apply tag filter
+        if (query.tag && taggedCaseIds.length > 0) {
+            conditions.push(inArray(casesTable.id, taggedCaseIds));
+        }
+
+        // Determine sort order
+        let orderByClause;
+        switch (query.sortBy) {
+            case 'oldest':
+                orderByClause = asc(casesTable.createdAt);
+                break;
+            case 'priority':
+                // Custom priority ordering: urgent > high > medium > low
+                orderByClause = sql`CASE ${casesTable.priority} WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 END`;
+                break;
+            case 'status':
+                orderByClause = casesTable.status;
+                break;
+            case 'newest':
+            default:
+                orderByClause = desc(casesTable.createdAt);
+                break;
+        }
+
+        // Build and execute the complete query
+        const queryBuilder = db
+            .select()
+            .from(casesTable)
+            .where(conditions.length === 1 ? conditions[0] : and(...conditions))
+            .orderBy(orderByClause)
+            .limit(limit)
+            .offset(offset);
+
+        const results = await queryBuilder.execute();
+
+        return results;
+    } catch (error) {
+        console.error('Get cases failed:', error);
+        throw error;
+    }
 }
 
 /**
